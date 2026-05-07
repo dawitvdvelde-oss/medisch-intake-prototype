@@ -1,1 +1,303 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Medisch intake recorder</title>
+  <style>
+    :root {
+      --ink: #1f2933;
+      --muted: #64748b;
+      --line: #d8dee8;
+      --panel: #f7f9fc;
+      --accent: #2868a6;
+      --accent-dark: #1a3a5c;
+      --danger: #b42318;
+      --ok: #13795b;
+      --white: #ffffff;
+    }
 
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      color: var(--ink);
+      background: var(--white);
+    }
+
+    main {
+      width: min(820px, calc(100% - 32px));
+      margin: 32px auto;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--white);
+    }
+
+    .header {
+      padding: 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.2;
+    }
+
+    .hint {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .content { padding: 18px; }
+
+    label {
+      display: block;
+      margin: 14px 0 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      font: inherit;
+      color: var(--ink);
+      background: var(--white);
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 6px;
+      padding: 11px 14px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      background: var(--accent);
+      color: var(--white);
+    }
+
+    button.secondary {
+      color: var(--accent-dark);
+      background: #e8f0f8;
+    }
+
+    button.danger { background: var(--danger); }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
+
+    .status {
+      min-height: 24px;
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .status.error { color: var(--danger); }
+    .status.ok { color: var(--ok); }
+
+    audio {
+      width: 100%;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <div class="header">
+        <h1>Medisch intake recorder</h1>
+        <div class="hint">Neem live audio op. Na stoppen wordt de opname gecontroleerd in Apps Script en daarna automatisch als PDF gemaild.</div>
+      </div>
+
+      <div class="content">
+        <label for="webAppUrl">Google Apps Script webapp-URL</label>
+        <input id="webAppUrl" placeholder="https://script.google.com/macros/s/.../exec">
+
+        <div class="button-row">
+          <button id="startBtn" type="button">Opname starten</button>
+          <button id="stopBtn" class="danger" type="button" disabled>Stoppen en controleren</button>
+          <button id="clearBtn" class="secondary" type="button">Wissen</button>
+        </div>
+
+        <div id="status" class="status">Plak je Apps Script webapp-URL en start daarna de opname.</div>
+        <audio id="audioPreview" controls hidden></audio>
+
+        <form id="postForm" method="post">
+          <input type="hidden" name="mode" value="review">
+          <input type="hidden" id="audioDataUrl" name="audioDataUrl">
+          <input type="hidden" id="audioFileName" name="audioFileName">
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const webAppUrlInput = document.getElementById('webAppUrl');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const statusEl = document.getElementById('status');
+    const audioPreview = document.getElementById('audioPreview');
+    const postForm = document.getElementById('postForm');
+    const audioDataUrlInput = document.getElementById('audioDataUrl');
+    const audioFileNameInput = document.getElementById('audioFileName');
+
+    let stream;
+    let mediaRecorder;
+    let chunks = [];
+
+    webAppUrlInput.value = localStorage.getItem('medicalIntakeWebAppUrl') || '';
+    webAppUrlInput.addEventListener('input', () => {
+      localStorage.setItem('medicalIntakeWebAppUrl', webAppUrlInput.value.trim());
+    });
+
+    startBtn.addEventListener('click', startRecording);
+    stopBtn.addEventListener('click', stopAndSend);
+    clearBtn.addEventListener('click', clearState);
+
+    async function startRecording() {
+      try {
+        const webAppUrl = webAppUrlInput.value.trim();
+        if (!webAppUrl) {
+          setStatus('Plak eerst je Google Apps Script webapp-URL.', 'error');
+          return;
+        }
+
+        if (!window.isSecureContext) {
+          setStatus('Deze pagina moet via https:// draaien. Gebruik de GitHub Pages URL, niet een losse file:// pagina.', 'error');
+          return;
+        }
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus('Deze browser ondersteunt live microfoonopname niet.', 'error');
+          return;
+        }
+
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        chunks = [];
+        audioPreview.hidden = true;
+
+        const mimeType = pickMimeType();
+        mediaRecorder = mimeType
+          ? new MediaRecorder(stream, { mimeType })
+          : new MediaRecorder(stream);
+
+        mediaRecorder.addEventListener('dataavailable', event => {
+          if (event.data.size > 0) chunks.push(event.data);
+        });
+
+        mediaRecorder.addEventListener('stop', submitRecording);
+        mediaRecorder.start();
+
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        setStatus('Opname loopt...');
+      } catch (error) {
+        console.error(error);
+        setStatus('Microfoon kon niet worden gestart. Fout (' + (error.name || 'Onbekend') + '): ' + error.message, 'error');
+      }
+    }
+
+    function stopAndSend() {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        stopBtn.disabled = true;
+        setStatus('Opname stoppen en controle voorbereiden...');
+        mediaRecorder.stop();
+      }
+    }
+
+    async function submitRecording() {
+      try {
+        if (stream) stream.getTracks().forEach(track => track.stop());
+
+        const mimeType = mediaRecorder.mimeType || pickMimeType() || 'audio/webm';
+        const blob = new Blob(chunks, { type: mimeType });
+        const extension = extensionForMimeType(mimeType);
+        const fileName = 'live-intake-' + new Date().toISOString().replace(/[:.]/g, '-') + extension;
+
+        audioPreview.src = URL.createObjectURL(blob);
+        audioPreview.hidden = false;
+
+        audioDataUrlInput.value = await blobToDataUrl(blob);
+        audioFileNameInput.value = fileName;
+        postForm.action = webAppUrlInput.value.trim();
+        localStorage.setItem('medicalIntakeWebAppUrl', webAppUrlInput.value.trim());
+
+        setStatus('Audio wordt naar Apps Script gestuurd voor controle...');
+        postForm.submit();
+      } catch (error) {
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        console.error(error);
+        setStatus('Verzenden mislukt: ' + error.message, 'error');
+      }
+    }
+
+    function clearState() {
+      chunks = [];
+      audioDataUrlInput.value = '';
+      audioFileNameInput.value = '';
+      audioPreview.hidden = true;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      setStatus('Klaar voor een nieuwe opname.');
+    }
+
+    function pickMimeType() {
+      const candidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/mpeg'
+      ];
+
+      for (const type of candidates) {
+        if (MediaRecorder.isTypeSupported(type)) return type;
+      }
+
+      return '';
+    }
+
+    function extensionForMimeType(mimeType) {
+      if (mimeType.includes('mp4')) return '.m4a';
+      if (mimeType.includes('mpeg')) return '.mp3';
+      return '.webm';
+    }
+
+    function blobToDataUrl(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    function setStatus(message, type) {
+      statusEl.className = 'status' + (type ? ' ' + type : '');
+      statusEl.textContent = message;
+    }
+  </script>
+</body>
+</html>
