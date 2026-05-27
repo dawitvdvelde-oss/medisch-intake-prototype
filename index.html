@@ -473,7 +473,7 @@
       <div class="status-title" id="statusTitle">Tik om op te nemen</div>
       <div class="status-sub" id="statusSub">Opname starten</div>
       <div class="timer" id="timerEl"></div>
-      <div class="progress-steps" id="progressSteps">Audio versturen naar controlepagina...</div>
+      <div class="progress-steps" id="progressSteps">Transcriberen, velden herkennen en PDF mailen...</div>
     </div>
 
     <div class="error-toast" id="errorToast"></div>
@@ -490,8 +490,10 @@
       </label>
     </div>
 
-    <form id="postForm" method="post">
-      <input type="hidden" name="mode" value="review">
+    <iframe id="backgroundFrame" name="backgroundFrame" title="Achtergrondverwerking" hidden></iframe>
+
+    <form id="postForm" method="post" target="backgroundFrame">
+      <input type="hidden" name="mode" value="background">
       <input type="hidden" id="audioDataUrl" name="audioDataUrl">
       <input type="hidden" id="audioFileName" name="audioFileName">
     </form>
@@ -535,10 +537,26 @@
     const postForm = document.getElementById('postForm');
     const audioDataUrlInput = document.getElementById('audioDataUrl');
     const audioFileNameInput = document.getElementById('audioFileName');
+    let processingTimeout = null;
 
     webAppUrlInput.value = localStorage.getItem('medicalIntakeWebAppUrl') || '';
     webAppUrlInput.addEventListener('input', () => {
       localStorage.setItem('medicalIntakeWebAppUrl', webAppUrlInput.value.trim());
+    });
+
+    window.addEventListener('message', event => {
+      const data = event.data || {};
+      if (!data || data.source !== 'medical-intake') return;
+
+      clearTimeout(processingTimeout);
+
+      if (data.status === 'ok') {
+        setComplete(data.email);
+        return;
+      }
+
+      setIdle();
+      showError(data.message || 'Verwerken mislukt.');
     });
 
     function toggleSettings() {
@@ -597,8 +615,21 @@
       micBtn.classList.add('sending');
       micBtn.disabled = true;
       statusTitle.textContent = 'Verwerken...';
-      statusSub.textContent = 'Controlepagina openen';
+      statusSub.textContent = 'Dit gebeurt op de achtergrond';
       progressSteps.classList.add('visible');
+      animateBars(false);
+    }
+
+    function setComplete(email) {
+      isBusy = false;
+      screen.classList.remove('recording');
+      micBtn.classList.remove('sending');
+      micBtn.disabled = false;
+      micIcon.innerHTML = '<path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/>';
+      statusTitle.textContent = 'PDF verstuurd';
+      statusSub.textContent = email ? ('Verzonden naar ' + email) : 'Verzending afgerond';
+      timerEl.textContent = '';
+      progressSteps.classList.remove('visible');
       animateBars(false);
     }
 
@@ -676,6 +707,12 @@
       audioFileNameInput.value = fileName;
       postForm.action = getWebAppUrl();
       postForm.submit();
+
+      clearTimeout(processingTimeout);
+      processingTimeout = setTimeout(() => {
+        statusTitle.textContent = 'Nog bezig...';
+        statusSub.textContent = 'Transcriptie en mail kunnen even duren';
+      }, 45000);
     }
 
     function getWebAppUrl() {
